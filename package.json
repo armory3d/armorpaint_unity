@@ -1,0 +1,9 @@
+{
+  "name": "org.armorpaint.editor",
+  "displayName": "ArmorPaint",
+  "version": "0.7.0",
+  "unity": "2018.3",
+  "description": "Unity plugin for ArmorPaint",
+  "license": "zlib/libpng",
+  "dependencies": {}
+}

@@ -53,8 +53,11 @@ public class ArmorPaint {
 		else {
 			path = EditorPrefs.GetString("ArmorPaintPath");
 		}
-		string filepath = path + "/data/temp.obj";
-		string binpath = path + "/ArmorPaint" + GetBinaryExtension();
+		string sep = SystemInfo.operatingSystemFamily == OperatingSystemFamily.Windows ? "\\" : "/";
+		path = path.Replace("/", sep);
+		path = path.Replace("\\", sep);
+		string filepath = path + sep + "data" + sep + "temp.obj";
+		string binpath = path + sep + "ArmorPaint" + GetBinaryExtension();
 
 		using (StreamWriter sw = new StreamWriter(filepath)) {
 			sw.Write(MeshToObj(mf, name));

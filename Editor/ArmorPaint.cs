@@ -39,12 +39,18 @@ public class ArmorPaint {
 
 	[MenuItem("ArmorPaint/Paint Selected")]
 	private static void ArmorPaintPaintOption() {
-		if (Selection.gameObjects.Length == 0) return;
+		if (Selection.gameObjects.Length == 0) {
+            EditorUtility.DisplayDialog("No Selection", "Select a GameObject to paint.", "OK");
+            return;
+		}
 
 		string name = Selection.gameObjects[0].name;
 		Transform t = Selection.gameObjects[0].transform;
 		MeshFilter mf = t.GetComponent<MeshFilter>();
-		if (mf == null) return;
+		if (mf == null) {
+            EditorUtility.DisplayDialog("No Mesh Filter", "Select a GameObject with Mesh Filter component.", "OK");
+            return;
+		}
 
 		string path;
 		if (!EditorPrefs.HasKey("ArmorPaintPath")) {

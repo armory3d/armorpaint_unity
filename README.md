@@ -6,6 +6,9 @@ Unity plugin for ArmorPaint
 - Select an object to paint on
 - Press `Menu bar - ArmorPaint - Paint Selected`
 - Select folder where ArmorPaint is located during the first run
+- Paint and close ArmorPaint, choose to save changes
+- Painted textures are exported to `Assets/ArmorPaintProjects/<Object>` and applied to the object material
+- Press `Paint Selected` again to continue painting the saved project
 
 # UPM Package
 

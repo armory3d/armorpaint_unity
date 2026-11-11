@@ -8,8 +8,9 @@ using UnityEngine;
 using UnityEditor;
 using Debug = UnityEngine.Debug;
 
-// Paints the selected object in ArmorPaint and brings the painted textures back.
-// Each painted object gets a project at Assets/ArmorPaintProjects/<Name>/<Name>.arm.
+// Paints the selected objects in ArmorPaint and brings the painted textures back.
+// The selection gets a project at Assets/ArmorPaintProjects/<Name>/<Name>.arm, multiple selected
+// objects are painted together in one project and share one material.
 // When ArmorPaint closes, textures are exported from the project next to it and
 // assigned to the object's material.
 [InitializeOnLoad]
@@ -24,50 +25,154 @@ public class ArmorPaint {
 		EditorApplication.focusChanged += OnFocusChanged;
 	}
 
-	private static string MeshToObj(MeshFilter mf, string name) {
-		Mesh m = mf.sharedMesh;
+	// A selected object to paint
+	private class Target {
+		public string name;
+		public MeshFilter filter;
+		public Renderer renderer;
+	}
+
+	// Writes all targets into one OBJ, one object per target.
+	// A single object is exported in its local space. Multiple objects are exported with their
+	// world transforms, centered around the selection, so they are laid out in ArmorPaint as in the scene.
+	private static string MeshesToObj(List<Target> targets) {
+		// Normals are written only when every mesh has them, otherwise ArmorPaint computes them
+		bool hasNormals = targets.TrueForAll(t => t.filter.sharedMesh.normals.Length == t.filter.sharedMesh.vertexCount);
+
+		Vector3 center = Vector3.zero;
+		if (targets.Count > 1) {
+			Bounds bounds = targets[0].renderer.bounds;
+			foreach (Target t in targets) {
+				bounds.Encapsulate(t.renderer.bounds);
+			}
+			center = bounds.center;
+		}
 
 		StringBuilder sb = new StringBuilder();
-		sb.Append(string.Format(CultureInfo.InvariantCulture, "o {0}\n", name));
+		// OBJ indices are global to the file, each object continues after the previous one
+		int indexBase = 0;
+		foreach (Target t in targets) {
+			Mesh m = t.filter.sharedMesh;
+			sb.Append(string.Format(CultureInfo.InvariantCulture, "o {0}\n", t.name));
 
-		// Unity is left-handed, OBJ is right-handed: mirror X and reverse the winding order,
-		// otherwise ArmorPaint shows a mirrored mesh and strokes appear mirrored back in Unity
-		foreach(Vector3 v in m.vertices) {
-			sb.Append(string.Format(CultureInfo.InvariantCulture, "v {0} {1} {2}\n", -v.x, v.y, v.z));
-		}
-
-		foreach(Vector3 v in m.normals) {
-			sb.Append(string.Format(CultureInfo.InvariantCulture, "vn {0} {1} {2}\n", -v.x, v.y, v.z));
-		}
-
-		foreach(Vector3 v in m.uv) {
-			sb.Append(string.Format(CultureInfo.InvariantCulture, "vt {0} {1}\n", v.x, v.y));
-		}
-
-		for (int material = 0; material < m.subMeshCount; material++) {
-			int[] triangles = m.GetTriangles(material);
-			for (int i = 0; i < triangles.Length; i += 3) {
-				sb.Append(string.Format(CultureInfo.InvariantCulture, "f {0}/{0}/{0} {1}/{1}/{1} {2}/{2}/{2}\n",
-					triangles[i]+1, triangles[i+2]+1, triangles[i+1]+1));
+			Matrix4x4 matrix = Matrix4x4.identity;
+			if (targets.Count > 1) {
+				matrix = Matrix4x4.Translate(-center) * t.filter.transform.localToWorldMatrix;
 			}
+			Matrix4x4 normalMatrix = matrix.inverse.transpose;
+			// Mirroring transforms flip the winding order
+			bool flip = matrix.determinant < 0.0f;
+
+			// Unity is left-handed, OBJ is right-handed: mirror X and reverse the winding order,
+			// otherwise ArmorPaint shows a mirrored mesh and strokes appear mirrored back in Unity
+			Vector3[] vertices = m.vertices;
+			foreach (Vector3 vertex in vertices) {
+				Vector3 v = matrix.MultiplyPoint3x4(vertex);
+				sb.Append(string.Format(CultureInfo.InvariantCulture, "v {0} {1} {2}\n", -v.x, v.y, v.z));
+			}
+
+			if (hasNormals) {
+				foreach (Vector3 normal in m.normals) {
+					Vector3 v = normalMatrix.MultiplyVector(normal).normalized;
+					sb.Append(string.Format(CultureInfo.InvariantCulture, "vn {0} {1} {2}\n", -v.x, v.y, v.z));
+				}
+			}
+
+			foreach (Vector2 v in m.uv) {
+				sb.Append(string.Format(CultureInfo.InvariantCulture, "vt {0} {1}\n", v.x, v.y));
+			}
+
+			string face = hasNormals ? "f {0}/{0}/{0} {1}/{1}/{1} {2}/{2}/{2}\n" : "f {0}/{0} {1}/{1} {2}/{2}\n";
+			for (int material = 0; material < m.subMeshCount; material++) {
+				int[] triangles = m.GetTriangles(material);
+				for (int i = 0; i < triangles.Length; i += 3) {
+					int a = indexBase + triangles[i] + 1;
+					int b = indexBase + triangles[i + 1] + 1;
+					int c = indexBase + triangles[i + 2] + 1;
+					if (flip) {
+						sb.Append(string.Format(CultureInfo.InvariantCulture, face, a, b, c));
+					}
+					else {
+						sb.Append(string.Format(CultureInfo.InvariantCulture, face, a, c, b));
+					}
+				}
+			}
+			indexBase += vertices.Length;
 		}
 
 		return sb.ToString();
 	}
 
-	[MenuItem("ArmorPaint/Paint Selected")]
-	private static void ArmorPaintPaintOption() {
-		GameObject go = Selection.activeGameObject;
-		if (go == null) {
-			EditorUtility.DisplayDialog("No Selection", "Select a GameObject to paint.", "OK");
-			return;
+	private static bool IsPaintable(MeshFilter mf) {
+		return mf.sharedMesh != null && mf.GetComponent<Renderer>() != null;
+	}
+
+	// Every selected GameObject with a mesh is painted, including the meshes of its children,
+	// so that selecting a group paints all of its objects.
+	// The project names come from the painted meshes only, not from how they were selected:
+	// each mesh is named after its highest ancestor whose meshes are all painted. Selecting a group
+	// or selecting all of its meshes one by one both map to the group, and so to the same project.
+	private static List<Target> GetTargets(Transform[] selected, out List<string> names) {
+		List<Transform> roots = new List<Transform>(selected);
+		roots.Sort((a, b) => string.CompareOrdinal(a.name, b.name));
+
+		List<Target> targets = new List<Target>();
+		HashSet<MeshFilter> painted = new HashSet<MeshFilter>();
+		HashSet<string> objectNames = new HashSet<string>();
+		foreach (Transform root in roots) {
+			foreach (MeshFilter mf in root.GetComponentsInChildren<MeshFilter>()) {
+				if (!IsPaintable(mf) || !painted.Add(mf)) {
+					continue;
+				}
+				// Object names in the OBJ are kept unique, children of a group often share names
+				string objectName = SanitizeName(mf.name);
+				for (int i = 2; !objectNames.Add(objectName); i++) {
+					objectName = SanitizeName(mf.name) + "_" + i;
+				}
+				targets.Add(new Target { name = objectName, filter = mf, renderer = mf.GetComponent<Renderer>() });
+			}
 		}
 
-		MeshFilter mf = go.GetComponent<MeshFilter>();
-		Renderer renderer = go.GetComponent<Renderer>();
-		if (mf == null || mf.sharedMesh == null || renderer == null) {
-			EditorUtility.DisplayDialog("No Mesh Filter", "Select a GameObject with Mesh Filter and Mesh Renderer components.", "OK");
+		Dictionary<Transform, bool> coveredCache = new Dictionary<Transform, bool>();
+		Func<Transform, bool> covered = t => {
+			bool result;
+			if (!coveredCache.TryGetValue(t, out result)) {
+				result = Array.TrueForAll(t.GetComponentsInChildren<MeshFilter>(), mf => !IsPaintable(mf) || painted.Contains(mf));
+				coveredCache[t] = result;
+			}
+			return result;
+		};
+		HashSet<Transform> groups = new HashSet<Transform>();
+		foreach (Target t in targets) {
+			Transform group = t.filter.transform;
+			while (group.parent != null && covered(group.parent)) {
+				group = group.parent;
+			}
+			groups.Add(group);
+		}
+		names = new List<string>();
+		foreach (Transform group in groups) {
+			names.Add(SanitizeName(group.name));
+		}
+		// Sorted so that the same meshes map to the same project regardless of selection order
+		names.Sort(string.CompareOrdinal);
+		return targets;
+	}
+
+	[MenuItem("ArmorPaint/Paint Selected")]
+	private static void ArmorPaintPaintOption() {
+		List<string> names;
+		List<Target> targets = GetTargets(Selection.GetTransforms(SelectionMode.TopLevel), out names);
+		if (targets.Count == 0) {
+			EditorUtility.DisplayDialog("No Mesh Filter", "Select one or more GameObjects with Mesh Filter and Mesh Renderer components.", "OK");
 			return;
+		}
+		foreach (Target t in targets) {
+			Mesh m = t.filter.sharedMesh;
+			if (m.uv.Length != m.vertexCount) {
+				EditorUtility.DisplayDialog("No UVs", "'" + m.name + "' has no UVs, it can not be painted.", "OK");
+				return;
+			}
 		}
 
 		string exe = GetExecutable();
@@ -75,7 +180,7 @@ public class ArmorPaint {
 			return;
 		}
 
-		string name = SanitizeName(go.name);
+		string name = ProjectName(names);
 		string folder = ProjectsFolder + "/" + name;
 		string armAsset = folder + "/" + name + ".arm";
 		foreach (Pending p in LoadPending()) {
@@ -86,7 +191,9 @@ public class ArmorPaint {
 		}
 
 		EnsureFolder(folder);
-		string material = GetOrCreateMaterial(renderer, folder, name);
+		string material = targets.Count == 1 ?
+			GetOrCreateMaterial(targets[0].renderer, folder, name) :
+			GetOrCreateSharedMaterial(targets, folder, name);
 		string armPath = Path.GetFullPath(armAsset);
 
 		string args;
@@ -97,7 +204,7 @@ public class ArmorPaint {
 			// New project: open the mesh and save the project to its .arm path right away,
 			// so that saving on close goes there without asking for a location
 			string objPath = Path.Combine(Path.GetFullPath(EditorPrefs.GetString("ArmorPaintPath")), "data", "temp.obj");
-			File.WriteAllText(objPath, MeshToObj(mf, name));
+			File.WriteAllText(objPath, MeshesToObj(targets));
 
 			string scriptPath = Path.GetFullPath("Temp/armorpaint_link.c");
 			string armLiteral = armPath.Replace("\\", "\\\\").Replace("\"", "\\\"");
@@ -117,7 +224,7 @@ public class ArmorPaint {
 		List<Pending> pending = LoadPending();
 		pending.Add(new Pending { pid = process.Id, arm = armAsset, material = material });
 		SavePending(pending);
-		Debug.Log("ArmorPaint: painting '" + name + "', textures will be applied to " + material + " when ArmorPaint is closed.");
+		Debug.Log("ArmorPaint: painting '" + name + "' (" + targets.Count + " objects), textures will be applied to " + material + " when ArmorPaint is closed.");
 	}
 
 	[MenuItem("ArmorPaint/Set Path")]
@@ -197,6 +304,44 @@ public class ArmorPaint {
 		materials[0] = material;
 		renderer.sharedMaterials = materials;
 		PrefabUtility.RecordPrefabInstancePropertyModifications(renderer);
+		return path;
+	}
+
+	// Multiple objects share one material in the project folder, created from the first object's material,
+	// and assigned to all material slots of every object: ArmorPaint paints each mesh as a whole
+	private static string GetOrCreateSharedMaterial(List<Target> targets, string folder, string name) {
+		string path = folder + "/" + name + ".mat";
+		Material material = AssetDatabase.LoadAssetAtPath<Material>(path);
+		if (material == null) {
+			Material current = targets[0].renderer.sharedMaterial;
+			if (current != null) {
+				material = new Material(current);
+			}
+			else {
+				Shader shader = Shader.Find("Universal Render Pipeline/Lit");
+				if (shader == null) shader = Shader.Find("HDRP/Lit");
+				if (shader == null) shader = Shader.Find("Standard");
+				material = new Material(shader);
+			}
+			AssetDatabase.CreateAsset(material, path);
+		}
+
+		Undo.SetCurrentGroupName("Assign ArmorPaint Material");
+		foreach (Target t in targets) {
+			Material[] materials = t.renderer.sharedMaterials;
+			if (materials.Length == 0) {
+				materials = new Material[1];
+			}
+			if (Array.TrueForAll(materials, m => m == material)) {
+				continue;
+			}
+			Undo.RecordObject(t.renderer, "Assign ArmorPaint Material");
+			for (int i = 0; i < materials.Length; i++) {
+				materials[i] = material;
+			}
+			t.renderer.sharedMaterials = materials;
+			PrefabUtility.RecordPrefabInstancePropertyModifications(t.renderer);
+		}
 		return path;
 	}
 
@@ -364,6 +509,23 @@ public class ArmorPaint {
 		}
 		name = name.Trim().TrimEnd('.');
 		return name.Length > 0 ? name : "Object";
+	}
+
+	// Project name of the painted objects, sorted by name. Multiple objects share one project,
+	// named after all of them, or after the first one and a hash when that gets too long.
+	private static string ProjectName(List<string> names) {
+		const int maxLength = 48;
+		string joined = string.Join("_", names);
+		if (names.Count == 1 || joined.Length <= maxLength) {
+			return joined;
+		}
+		// FNV-1a, string.GetHashCode is not stable across sessions
+		uint hash = 2166136261;
+		foreach (char c in string.Join("/", names)) {
+			hash = (hash ^ c) * 16777619;
+		}
+		string first = names[0].Length > maxLength - 18 ? names[0].Substring(0, maxLength - 18) : names[0];
+		return string.Format(CultureInfo.InvariantCulture, "{0}_{1}_{2:x8}", first, names.Count, hash);
 	}
 
 	private static string Quote(string s) {
